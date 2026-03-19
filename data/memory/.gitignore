@@ -1,0 +1,4 @@
+# 忽略 Agent 工作记忆快照，只保留目录占位符
+*
+!.gitkeep
+!.gitignore

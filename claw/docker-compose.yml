@@ -1,0 +1,131 @@
+# =============================================================================
+# docker-compose.yml（claw/）— 完整 Docker 栈（Gateway + Agent）
+#
+# 适用场景：生产环境完整部署，所有服务容器化
+#
+# 启动：
+#   make -C claw up     （在项目根目录）
+#   或 docker compose -f claw/docker-compose.yml up -d
+# =============================================================================
+
+name: claw_omni
+
+services:
+  # ── Layer 1：OpenClaw Gateway ───────────────────────────────────────────────
+  omni-gateway:
+    image: ghcr.io/openclaw/openclaw:latest
+    container_name: omni-gateway
+    restart: unless-stopped
+    ports:
+      - "10100:18789"
+      - "10109:18790"
+    volumes:
+      # 系统配置来自项目 claw/config/（不读宿主机 ~/.openclaw，与宿主机 openclaw 完全独立）
+      - ./config:/home/node/.openclaw
+      # skills 单独挂载：claw/skills/ → 容器内 /home/node/.openclaw/skills/
+      # 覆盖 config/ 下的 skills 子目录，确保只用本项目的 skill 文件
+      - ./skills:/home/node/.openclaw/skills
+      - ./workspace:/home/node/.openclaw/workspace
+    environment:
+      HOME: /home/node
+      TERM: xterm-256color
+      TZ: Asia/Shanghai
+      OPENCLAW_GATEWAY_TOKEN: "tony_research"
+      OPENCLAW_GATEWAY_PASSWORD: "tony_research"
+      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: "1"
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-cli_a939102f4cb81bcc}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET}
+      # 容器间通信：通过 Docker 内网访问后端
+      RESEARCH_URL: "http://omni-research:10101"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    init: true
+    command:
+      [
+        "node", "dist/index.js", "gateway",
+        "--bind", "lan",
+        "--port", "18789",
+      ]
+    healthcheck:
+      test:
+        [
+          "CMD", "node", "-e",
+          "fetch('http://127.0.0.1:18789/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      omni-research:
+        condition: service_healthy
+    networks:
+      - omni_net
+
+  # ── Layer 2：Python 科研后端 ────────────────────────────────────────────────
+  omni-research:
+    build:
+      context: ..
+      dockerfile: Dockerfile.research
+    container_name: omni-research
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:10101:10101"
+    environment:
+      PROJECT_NAME: omniscientist_claw
+      INSTANCE_TYPE: orchestrator
+      INSTANCE_NAME: omniscientist_claw
+      PORT: "10101"
+      HOST: "0.0.0.0"
+
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-http://endpoint/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-gemini-3.1-pro-preview-thinking}
+      FAST_MODEL: ${FAST_MODEL:-gemini-3.1-pro-preview-thinking}
+
+      # 容器访问宿主机 MySQL / Redis —— 硬编码 host.docker.internal，不从 .env 继承
+      # （.env.omniscientist 中的 MYSQL_URL / REDIS_URL 仅供宿主机本地运行使用）
+      MYSQL_URL: "mysql+aiomysql://root:agent%211234@host.docker.internal:3306/openclaw_research"
+      REDIS_URL: "redis://host.docker.internal:6379/0"
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-omni_research}
+
+      # 凭据从 .env.omniscientist 注入，用于 Worker 主动推送结果到飞书（HTTP API）
+      # FEISHU_ADAPTER_ENABLED=false：禁用 WebSocket 监听，避免与 omni-gateway 双连接冲突
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      FEISHU_ADAPTER_ENABLED: "false"
+
+      WORKER_COUNT: ${WORKER_COUNT:-5}
+      MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-20}
+      TASK_TIMEOUT: ${TASK_TIMEOUT:-600}
+
+      SMTP_HOST: ${SMTP_HOST:-smtp.163.com}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_AUTHORIZATION_CODE: ${SMTP_AUTHORIZATION_CODE:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_USER: ${SMTP_USER:-}
+
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TZ: Asia/Shanghai
+    volumes:
+      - ../data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:10101/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - omni_net
+
+networks:
+  omni_net:
+    name: omni_net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24

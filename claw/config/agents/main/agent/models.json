@@ -1,0 +1,29 @@
+{
+  "providers": {
+    "openai-proxy": {
+      "baseUrl": "http://endpoint/v1",
+      "apiKey": "sk-xxx",
+      "api": "openai-completions",
+      "models": [
+        {
+          "id": "gemini-3.1-pro-preview-thinking",
+          "name": "Gemini 3.1 Pro Preview (Thinking)",
+          "api": "openai-completions",
+          "reasoning": true,
+          "input": [
+            "text",
+            "image"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 1000000,
+          "maxTokens": 65536
+        }
+      ]
+    }
+  }
+}

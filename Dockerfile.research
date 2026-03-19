@@ -1,0 +1,49 @@
+# =============================================================================
+# Python 科研后端 Dockerfile（多阶段构建）
+# 构建 omni-research 容器
+#
+# 多阶段构建优势：
+#   builder 阶段安装编译工具，仅安装依赖
+#   runtime 阶段只含运行时库，镜像更小（~200MB vs ~600MB）
+#   代码变更时只重跑 COPY 步骤，构建缓存利用率高
+# =============================================================================
+
+# ── 阶段1：构建依赖（含编译工具）─────────────────────────────────────────────
+FROM python:3.11-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    default-libmysqlclient-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# ── 阶段2：运行时（最小化镜像）────────────────────────────────────────────────
+FROM python:3.11-slim AS runtime
+
+# 只安装运行时需要的库（libmariadb3 是 aiomysql/mysqlclient 运行时依赖）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libmariadb3 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# 从 builder 阶段复制已安装的 Python 包
+COPY --from=builder /install /usr/local
+
+# 复制项目代码
+COPY . .
+
+# 确保数据目录存在（宿主机挂载时会被覆盖，这里只是 fallback）
+RUN mkdir -p data/logs data/memory data/knowledge data/chroma data/pids
+
+EXPOSE 10101
+
+CMD ["python", "-m", "uvicorn", "api.main:app", \
+     "--host", "0.0.0.0", "--port", "10101", \
+     "--workers", "1", "--log-level", "info", "--timeout-keep-alive", "120"]

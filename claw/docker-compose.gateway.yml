@@ -1,0 +1,70 @@
+# =============================================================================
+# docker-compose.gateway.yml — 仅启动 omni-gateway（OpenClaw Gateway）
+#
+# 适用场景：
+#   - Python 科研后端已在宿主机运行（./start.sh start -d）
+#   - 只需要 Gateway 容器化，后端通过 host.docker.internal 访问
+#
+# 启动：
+#   make -C claw up-gateway
+#   或 docker compose -f claw/docker-compose.gateway.yml up -d
+# =============================================================================
+
+name: claw_omni
+
+services:
+  omni-gateway:
+    image: ghcr.io/openclaw/openclaw:latest
+    container_name: omni-gateway
+    restart: unless-stopped
+    ports:
+      - "10100:18789"   # Gateway Web UI
+      - "10109:18790"   # WebSocket Bridge
+    volumes:
+      # 系统配置来自项目 claw/config/（不读宿主机 ~/.openclaw，与宿主机 openclaw 完全独立）
+      - ./config:/home/node/.openclaw
+      # skills 单独挂载：claw/skills/ → 容器内 /home/node/.openclaw/skills/
+      # 覆盖 config/ 下的 skills 子目录，确保只用本项目的 skill 文件
+      - ./skills:/home/node/.openclaw/skills
+      - ./workspace:/home/node/.openclaw/workspace
+    environment:
+      HOME: /home/node
+      TERM: xterm-256color
+      TZ: Asia/Shanghai
+      OPENCLAW_GATEWAY_TOKEN: "tony_research"
+      OPENCLAW_GATEWAY_PASSWORD: "tony_research"
+      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: "1"
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-cli_a939102f4cb81bcc}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET}
+      # 连接宿主机上运行的 Python 后端
+      RESEARCH_URL: "${RESEARCH_URL:-http://host.docker.internal:10101}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    init: true
+    command:
+      [
+        "node", "dist/index.js", "gateway",
+        "--bind", "lan",
+        "--port", "18789",
+      ]
+    healthcheck:
+      test:
+        [
+          "CMD", "node", "-e",
+          "fetch('http://127.0.0.1:18789/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - omni_net
+
+networks:
+  omni_net:
+    name: omni_net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24

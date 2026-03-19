@@ -1,0 +1,78 @@
+# =============================================================================
+# docker-compose.agent.yml — 仅启动 omni-research（Python 后端）
+#
+# 适用场景：
+#   - Gateway 已单独运行（宿主机 openclaw 或 claw/docker-compose.gateway.yml）
+#   - 只需要后端容器化
+#
+# 启动：
+#   make -C claw up-agent
+#   或 docker compose -f claw/docker-compose.agent.yml up -d
+# =============================================================================
+
+name: claw_omni
+
+services:
+  omni-research:
+    build:
+      context: ..
+      dockerfile: Dockerfile.research
+    container_name: omni-research
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:10101:10101"
+    environment:
+      PROJECT_NAME: omniscientist_claw
+      INSTANCE_TYPE: orchestrator
+      INSTANCE_NAME: omniscientist_claw
+      PORT: "10101"
+      HOST: "0.0.0.0"
+
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-http://endpoint/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-gemini-3.1-pro-preview-thinking}
+      FAST_MODEL: ${FAST_MODEL:-gemini-3.1-pro-preview-thinking}
+
+      # 容器访问宿主机 MySQL / Redis —— 硬编码 host.docker.internal
+      MYSQL_URL: "mysql+aiomysql://root:agent%211234@host.docker.internal:3306/openclaw_research"
+      REDIS_URL: "redis://host.docker.internal:6379/0"
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-omni_research}
+
+      # 飞书消息由 omni-gateway 处理，本容器不直连飞书 WebSocket
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      FEISHU_ADAPTER_ENABLED: "false"
+
+      WORKER_COUNT: ${WORKER_COUNT:-5}
+      MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-20}
+      TASK_TIMEOUT: ${TASK_TIMEOUT:-600}
+
+      SMTP_HOST: ${SMTP_HOST:-smtp.163.com}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_AUTHORIZATION_CODE: ${SMTP_AUTHORIZATION_CODE:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_USER: ${SMTP_USER:-}
+
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TZ: Asia/Shanghai
+    volumes:
+      - ../data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:10101/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - omni_net
+
+networks:
+  omni_net:
+    name: omni_net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24

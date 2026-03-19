@@ -1,0 +1,4 @@
+# 忽略运行时 prompt 缓存，只保留目录占位符
+*
+!.gitkeep
+!.gitignore

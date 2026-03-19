@@ -1,0 +1,155 @@
+# =============================================================================
+# Omniscientist Claw — 独立 Docker 套件
+#
+# 端口规划（严格在 10100-10199 范围内）：
+#
+#   10100  omni-gateway   专属 OpenClaw Gateway Web UI 入口（对外）
+#   10101  omni-research  科研后端 API + Web 控制台（对外 / 本地模式主端口）
+#   10102  omni-research  容器模式调试暴露（127.0.0.1:10102，仅本机）
+#   10109  omni-gateway   WebSocket Bridge（对外）
+#
+# 两种部署模式：
+#
+#   模式 A — 完整 Docker 部署（推荐生产）
+#     全部服务在容器内。research.sh 在 omni-gateway 容器内执行，访问 omni-research:10101。
+#     启动：./start.sh docker-up
+#
+#   模式 B — Gateway Docker + Research 宿主机（开发/调试）
+#     omni-research 以 conda 运行在宿主机（端口 10101）。
+#     RESEARCH_URL=http://host.docker.internal:10101，omni-research 容器不启动。
+#     启动：./start.sh start -d  &&  ./start.sh docker-gateway-up
+#
+# 两种模式下日志目录（./data/logs/）、MySQL、Redis 配置均保持不变。
+# 宿主机 openclaw（port 10001）已与本系统完全解耦，不再有任何 Skill 依赖关系。
+# =============================================================================
+
+name: claw_omni
+
+services:
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Layer 1：专属 OpenClaw Gateway
+  # 对外端口 10100（Gateway Web UI）、10109（WebSocket Bridge）
+  # 独立飞书 App: cli_a939102f4cb81bcc（与宿主机任何 openclaw 实例完全隔离）
+  # ──────────────────────────────────────────────────────────────────────────
+  omni-gateway:
+    image: ghcr.io/openclaw/openclaw:latest
+    container_name: omni-gateway
+    restart: unless-stopped
+    ports:
+      - "10100:18789"   # Gateway Web UI 入口（宿主机 10100 → 容器内 18789）
+      - "10109:18790"   # WebSocket Bridge（宿主机 10109 → 容器内 18790）
+    volumes:
+      - ./claw/config:/home/node/.openclaw
+      - ./claw/workspace:/home/node/.openclaw/workspace
+    environment:
+      HOME: /home/node
+      TERM: xterm-256color
+      TZ: Asia/Shanghai
+      OPENCLAW_GATEWAY_TOKEN: "tony_research"
+      OPENCLAW_GATEWAY_PASSWORD: "tony_research"
+      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: "1"
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-cli_a939102f4cb81bcc}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET}
+      RESEARCH_URL: "${RESEARCH_URL:-http://omni-research:10101}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    init: true
+    command:
+      [
+        "node", "dist/index.js", "gateway",
+        "--bind", "lan",
+        "--port", "18789",
+      ]
+    healthcheck:
+      test:
+        [
+          "CMD", "node", "-e",
+          "fetch('http://127.0.0.1:18789/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - omni_net
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # 注：omni-cli（Node Host）已移除。research.sh 在 omni-gateway 容器内执行即可。
+  # 若需 exec.host=node 能力，可单独运行：docker run -d --network omni_net ...
+  # ──────────────────────────────────────────────────────────────────────────
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Layer 2：Python 科研后端（容器模式 / 模式 A）
+  # - 对外暴露：127.0.0.1:10102（本机调试）；正式流量走 Docker 内网 10101
+  # - 日志目录挂载到 ./data/logs/（宿主机路径，两种模式统一）
+  # - 数据库、Redis 通过 host.docker.internal 访问宿主机服务
+  # ──────────────────────────────────────────────────────────────────────────
+  omni-research:
+    build:
+      context: .
+      dockerfile: Dockerfile.research
+    container_name: omni-research
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:10101:10101"
+    environment:
+      PROJECT_NAME: omniscientist_claw
+      INSTANCE_TYPE: orchestrator
+      INSTANCE_NAME: omniscientist_claw
+      PORT: "10101"
+      HOST: "0.0.0.0"
+
+      # AI 推理（连接自建推理代理）
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-http://endpoint/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-gemini-3.1-pro-preview-thinking}
+      FAST_MODEL: ${FAST_MODEL:-gemini-3.1-pro-preview-thinking}
+
+      # 容器访问宿主机 MySQL / Redis —— 硬编码 host.docker.internal
+      MYSQL_URL: "mysql+aiomysql://root:agent%211234@host.docker.internal:3306/openclaw_research"
+      REDIS_URL: "redis://host.docker.internal:6379/0"
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-omni_research}
+
+      # 飞书消息由 omni-gateway 处理，本容器不直连飞书 WebSocket
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      FEISHU_ADAPTER_ENABLED: "false"
+
+      # Worker 配置
+      WORKER_COUNT: ${WORKER_COUNT:-5}
+      MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS:-20}
+      TASK_TIMEOUT: ${TASK_TIMEOUT:-600}
+
+      # 邮件（主动推送）
+      SMTP_HOST: ${SMTP_HOST:-smtp.163.com}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_AUTHORIZATION_CODE: ${SMTP_AUTHORIZATION_CODE:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_USER: ${SMTP_USER:-}
+
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TZ: Asia/Shanghai
+    volumes:
+      # 日志目录挂载：两种模式下宿主机 ./data/ 路径完全一致
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:10101/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - omni_net
+
+networks:
+  omni_net:
+    name: omni_net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24   # 独立网段，不与其他 Docker 网络冲突
